@@ -2,9 +2,9 @@ use gossip_glomers::Node;
 use serde_json::json;
 
 fn main() {
-    let mut node = Node::new();
+    let mut node = Node::new(());
     loop {
-        let msg = node.recv();
+        let msg = node.run();
         match msg.body["type"].as_str().unwrap() {
             "echo" => node.reply(
                 &msg,
