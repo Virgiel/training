@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, thread::scope};
 
 use gossip_glomers::{Node, KV};
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn main() {
     let commit: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
@@ -10,13 +10,13 @@ fn main() {
         "send" => {
             let key = msg.body["key"].as_str().unwrap().to_owned();
             loop {
-                let result = node.read(KV::Lin, &key.clone());
-                let prev = result.ok().map(|msg| msg.body["value"].as_u64().unwrap());
-                let (from, off) = prev.map(|n| (n.into(), n + 1)).unwrap_or((Value::Null, 0));
-                let result = node.cap(KV::Lin, &key.clone(), from, off.into(), prev.is_none());
+                let result = node.read(KV::Lin, &key);
+                let prev: Option<u64> = result.ok();
+                let (from, off) = prev.map(|n| (Some(n), n + 1)).unwrap_or((None, 0));
+                let result = node.cap(KV::Lin, &key, from, off, prev.is_none());
                 if result.is_ok() {
                     let db = format!("{}_{}", key, off);
-                    node.write(KV::Lin, &db, msg.body["msg"].clone()).ok();
+                    node.write(KV::Lin, &db, &msg.body["msg"]).ok();
                     node.reply(&msg, json!({"type": "send_ok", "offset": off}));
                     break;
                 }
@@ -24,7 +24,7 @@ fn main() {
         }
         "poll" => {
             let offsets: BTreeMap<String, u64> =
-                serde_json::from_value(msg.body["offsets"].clone()).unwrap();
+                serde_json::from_value(msg.body["offsets"].take()).unwrap();
             let msgs: BTreeMap<&String, Vec<(u64, u64)>> = scope(|s| {
                 offsets
                     .iter()
@@ -33,7 +33,7 @@ fn main() {
                             let mut off = *off;
                             let mut msgs = Vec::new();
                             while let Ok(msg) = node.read(KV::Lin, &format!("{k}_{off}")) {
-                                msgs.push((off, msg.body["value"].as_u64().unwrap()));
+                                msgs.push((off, msg));
                                 off += 1;
                             }
                             (k, msgs)

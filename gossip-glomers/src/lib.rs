@@ -10,7 +10,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub struct Node {
@@ -117,30 +117,32 @@ impl Node {
         self.tasks
             .lock()
             .add(sender, id, Instant::now() + Duration::from_secs(1));
-        self.send(dest.clone(), body.clone());
+        self.send(dest, body);
         receiver.recv().unwrap()
     }
 
-    pub fn read(&self, kv: KV, key: &str) -> Result<Msg, Err> {
+    pub fn read<M: DeserializeOwned>(&self, kv: KV, key: &str) -> Result<M, Err> {
         self.rpc(kv.id().to_string(), json!({"type": "read", "key": key}))
+            .map(|mut m| serde_json::from_value(m.body["value"].take()).unwrap())
     }
 
-    pub fn write(&self, kv: KV, key: &str, value: Value) -> Result<Msg, Err> {
+    pub fn write<M: Serialize>(&self, kv: KV, key: &str, value: M) -> Result<(), Err> {
         self.rpc(
             kv.id().to_string(),
             json!({"type": "write", "key": key, "value": value}),
         )
+        .map(|_| ())
     }
 
-    pub fn cap(
+    pub fn cap<A: Serialize, B: Serialize>(
         &self,
         kv: KV,
         key: &str,
-        from: Value,
-        to: Value,
+        from: A,
+        to: B,
         create_if_not_exists: bool,
-    ) -> Result<Msg, Err> {
-        self.rpc(kv.id().to_string(), json!({"type": "cas", "key": key, "from": from, "to": to, "create_if_not_exists": create_if_not_exists}))
+    ) -> Result<(), Err> {
+        self.rpc(kv.id().to_string(), json!({"type": "cas", "key": key, "from": from, "to": to, "create_if_not_exists": create_if_not_exists})).map(|_| ())
     }
 
     pub fn run(&self, lambda: impl Fn(&Node, Msg) + Send + Sync) {
@@ -221,24 +223,6 @@ pub enum Err {
     KeyAlreadyExists = 21,
     PreconditionFailed = 22,
     TxnConflict = 30,
-}
-
-impl Into<u64> for Err {
-    fn into(self) -> u64 {
-        match self {
-            Err::Timeout => 0,
-            Err::NodeNotFound => 1,
-            Err::NotSupported => 10,
-            Err::TemporarilyUnavailable => 11,
-            Err::MalformedRequest => 12,
-            Err::Crash => 13,
-            Err::Abort => 14,
-            Err::KeyDoesNotExist => 20,
-            Err::KeyAlreadyExists => 21,
-            Err::PreconditionFailed => 22,
-            Err::TxnConflict => 30,
-        }
-    }
 }
 
 impl TryFrom<u64> for Err {
