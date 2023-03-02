@@ -1,47 +1,47 @@
 use std::{
     collections::BTreeMap,
-    time::{Duration, Instant},
+    sync::atomic::{AtomicU64, Ordering::SeqCst},
+    thread::{scope, sleep},
+    time::Duration,
 };
 
 use gossip_glomers::Node;
 use serde_json::json;
-
-type Counters = BTreeMap<String, u64>;
-
 fn main() {
-    let mut node = Node::new(Counters::new());
-    *node.state_mut() = node.node_ids.iter().cloned().map(|s| (s, 0)).collect();
+    let node = Node::new();
+    let state: BTreeMap<String, AtomicU64> = node
+        .node_ids
+        .iter()
+        .cloned()
+        .map(|s| (s, AtomicU64::new(0)))
+        .collect();
 
-    /// Broadcast every 1 sec
-
-    fn broadcast(node: &mut Node<Counters>) {
-        node.spawn(
-            Box::new(|node, _| {
-                for id in node.node_ids.clone() {
-                    if id != node.id {
+    scope(|s| {
+        // Broadcast every 1 second
+        s.spawn(|| loop {
+            sleep(Duration::from_secs(1));
+            let current = state[&node.id].load(SeqCst);
+            for id in &node.node_ids {
+                if id != &node.id {
+                    let node = &node;
+                    s.spawn(move || {
                         node.rpc(
-                            id,
+                            id.clone(),
                             json!({
                                 "type": "broadcast",
-                                "counter": node.state()[&node.id]
+                                "counter": current
                             }),
-                            Box::new(|_, _| {}),
-                        );
-                    }
+                        )
+                        .ok();
+                    });
                 }
-                broadcast(node)
-            }),
-            Instant::now() + Duration::from_secs(1),
-        )
-    }
-    broadcast(&mut node);
+            }
+        });
 
-    loop {
-        let msg = node.run();
-        match msg.body["type"].as_str().unwrap() {
+        node.run(|node, msg| match msg.body["type"].as_str().unwrap() {
             "broadcast" => {
-                node.state_mut()
-                    .insert(msg.src.clone(), msg.body["counter"].as_u64().unwrap());
+                let counter = msg.body["counter"].as_u64().unwrap();
+                state[&msg.src].store(counter, SeqCst);
                 node.reply(
                     &msg,
                     json!({
@@ -49,19 +49,18 @@ fn main() {
                     }),
                 );
             }
-            "broadcast_ok" => {}
-            "read" => node.reply(
-                &msg,
-                json!({
-                    "type": "read_ok",
-                    "value": node.state().values().sum::<u64>()
-                }),
-            ),
+            "read" => {
+                let sum = state.values().map(|i| i.load(SeqCst)).sum::<u64>();
+                node.reply(
+                    &msg,
+                    json!({
+                        "type": "read_ok",
+                        "value": sum
+                    }),
+                )
+            }
             "add" => {
-                let key = node.id.clone();
-                node.state_mut()
-                    .entry(key)
-                    .and_modify(|c| *c += msg.body["delta"].as_u64().unwrap());
+                state[&node.id].fetch_add(msg.body["delta"].as_u64().unwrap(), SeqCst);
                 node.reply(
                     &msg,
                     json!({
@@ -70,6 +69,6 @@ fn main() {
                 )
             }
             ty => unreachable!("msg type {ty}"),
-        }
-    }
+        });
+    });
 }

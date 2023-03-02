@@ -16,6 +16,8 @@ generate: install
 echo: install
     cd ./maelstrom && ./maelstrom test -w echo --bin ~/.cargo/bin/maelstrom-echo --node-count 1 --time-limit 10
 
+all: echo generate broadcast counter kafka2
+
 install:
     cargo install --path ./gossip-glomers
 

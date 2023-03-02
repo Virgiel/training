@@ -1,141 +1,77 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, thread::scope};
 
-use gossip_glomers::{Msg, Node, KV};
+use gossip_glomers::{Node, KV};
+use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 fn main() {
-    let mut node = Node::new(());
-    let mut commit: BTreeMap<String, u64> = BTreeMap::new();
-
-    loop {
-        let mut msg = node.run();
-        match msg.body["type"].as_str().unwrap() {
-            "send" => {
-                fn task(node: &mut Node<()>, req: Msg) {
-                    let key = req.body["key"].as_str().unwrap().to_owned();
-                    node.read(
-                        KV::Lin,
-                        &key.clone(),
-                        Box::new(move |node, result| {
-                            let prev = result.ok().map(|msg| msg.body["value"].as_u64().unwrap());
-                            let (from, off) =
-                                prev.map(|n| (n.into(), n + 1)).unwrap_or((Value::Null, 0));
-                            node.cap(
-                                KV::Lin,
-                                &key.clone(),
-                                from,
-                                off.into(),
-                                prev.is_none(),
-                                Box::new(move |node, result| match result {
-                                    Ok(_) => {
-                                        let db = format!("{}_{}", key, off);
-                                        node.write(
-                                            KV::Lin,
-                                            &db,
-                                            req.body["msg"].clone(),
-                                            Box::new(move |node, _| {
-                                                node.reply(
-                                                    &req,
-                                                    json!({"type": "send_ok", "offset": off}),
-                                                )
-                                            }),
-                                        )
-                                    }
-                                    Err(_) => task(node, req),
-                                }),
-                            )
-                        }),
-                    )
+    let commit: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+    Node::new().run(|node, mut msg| match msg.body["type"].as_str().unwrap() {
+        "send" => {
+            let key = msg.body["key"].as_str().unwrap().to_owned();
+            loop {
+                let result = node.read(KV::Lin, &key.clone());
+                let prev = result.ok().map(|msg| msg.body["value"].as_u64().unwrap());
+                let (from, off) = prev.map(|n| (n.into(), n + 1)).unwrap_or((Value::Null, 0));
+                let result = node.cap(KV::Lin, &key.clone(), from, off.into(), prev.is_none());
+                if result.is_ok() {
+                    let db = format!("{}_{}", key, off);
+                    node.write(KV::Lin, &db, msg.body["msg"].clone()).ok();
+                    node.reply(&msg, json!({"type": "send_ok", "offset": off}));
+                    break;
                 }
-                task(&mut node, msg);
             }
-            "poll" => {
-                pub struct PollTask {
-                    req: Msg,
-                    offsets: BTreeMap<String, u64>,
-                    key: String,
-                    off: u64,
-                    msgs: BTreeMap<String, Vec<(u64, u64)>>,
-                }
-
-                impl PollTask {
-                    pub fn run(node: &mut Node<()>, req: Msg) {
-                        let offsets: BTreeMap<String, u64> =
-                            serde_json::from_value(req.body["offsets"].clone()).unwrap();
-                        Self {
-                            req,
-                            offsets,
-                            key: String::new(),
-                            off: 0,
-                            msgs: BTreeMap::new(),
-                        }
-                        .next_log(node);
-                    }
-
-                    fn read(self, node: &mut Node<()>) {
-                        node.read(
-                            KV::Lin,
-                            &format!("{}_{}", self.key, self.off),
-                            Box::new(|node, result| match result {
-                                Ok(msg) => {
-                                    let value = msg.body["value"].as_u64().unwrap();
-                                    self.next(node, value)
-                                }
-                                Err(_) => self.next_log(node),
-                            }),
-                        )
-                    }
-
-                    pub fn next(mut self, node: &mut Node<()>, value: u64) {
-                        self.msgs
-                            .entry(self.key.clone())
-                            .or_default()
-                            .push((self.off, value));
-                        self.off += 1;
-                        self.read(node)
-                    }
-
-                    pub fn next_log(mut self, node: &mut Node<()>) {
-                        if let Some((key, off)) = self.offsets.pop_first() {
-                            self.key = key;
-                            self.off = off;
-                            self.read(node)
-                        } else {
-                            node.reply(&self.req, json!({"type": "poll_ok", "msgs": self.msgs}));
-                        }
-                    }
-                }
-                PollTask::run(&mut node, msg)
-            }
-            "commit_offsets" => {
-                let offsets: BTreeMap<String, u64> =
-                    serde_json::from_value(msg.body["offsets"].take()).unwrap();
-                for (k, offset) in offsets {
-                    *commit.entry(k).or_default() = offset;
-                }
-                node.reply(
-                    &msg,
-                    json!({
-                        "type": "commit_offsets_ok"
-                    }),
-                );
-            }
-            "list_committed_offsets" => {
-                let keys: Vec<String> = serde_json::from_value(msg.body["keys"].take()).unwrap();
-                let offsets: BTreeMap<&String, &u64> = keys
-                    .iter()
-                    .map(|s| (s, commit.get(s).unwrap_or(&0)))
-                    .collect();
-
-                node.reply(
-                    &msg,
-                    json!({
-                        "type": "list_committed_offsets_ok",
-                        "offsets": offsets
-                    }),
-                );
-            }
-            ty => unreachable!("msg type {ty}"),
         }
-    }
+        "poll" => {
+            let offsets: BTreeMap<String, u64> =
+                serde_json::from_value(msg.body["offsets"].clone()).unwrap();
+            let msgs: BTreeMap<&String, Vec<(u64, u64)>> = scope(|s| {
+                offsets
+                    .iter()
+                    .map(|(k, off)| {
+                        s.spawn(move || {
+                            let mut off = *off;
+                            let mut msgs = Vec::new();
+                            while let Ok(msg) = node.read(KV::Lin, &format!("{k}_{off}")) {
+                                msgs.push((off, msg.body["value"].as_u64().unwrap()));
+                                off += 1;
+                            }
+                            (k, msgs)
+                        })
+                    })
+                    .map(|h| h.join().unwrap())
+                    .collect()
+            });
+            node.reply(&msg, json!({"type": "poll_ok", "msgs": msgs}));
+        }
+        "commit_offsets" => {
+            let offsets: BTreeMap<String, u64> =
+                serde_json::from_value(msg.body["offsets"].take()).unwrap();
+            for (k, offset) in offsets {
+                *commit.lock().entry(k).or_default() = offset;
+            }
+            node.reply(
+                &msg,
+                json!({
+                    "type": "commit_offsets_ok"
+                }),
+            );
+        }
+        "list_committed_offsets" => {
+            let keys: Vec<String> = serde_json::from_value(msg.body["keys"].take()).unwrap();
+            let offsets: BTreeMap<&String, u64> = keys
+                .iter()
+                .map(|s| (s, *commit.lock().get(s).unwrap_or(&0)))
+                .collect();
+
+            node.reply(
+                &msg,
+                json!({
+                    "type": "list_committed_offsets_ok",
+                    "offsets": offsets
+                }),
+            );
+        }
+        ty => unreachable!("msg type {ty}"),
+    });
 }
