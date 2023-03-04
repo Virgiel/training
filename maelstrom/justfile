@@ -18,8 +18,11 @@ echo: install
 
 all: echo generate broadcast counter kafka txn
 
+pull:
+    curl -L https://github.com/jepsen-io/maelstrom/releases/download/v0.2.3/maelstrom.tar.bz2 | tar -xj
+
 install:
-    cargo install --path ./gossip-glomers
+    cargo install --path .
 
 debug:
     maelstrom/maelstrom serve
