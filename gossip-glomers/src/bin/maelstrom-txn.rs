@@ -1,29 +1,28 @@
-use std::{
-    collections::BTreeMap,
-    sync::atomic::{AtomicU64, Ordering::SeqCst},
-};
+use std::collections::BTreeMap;
 
 use gossip_glomers::{Node, KV};
+use parking_lot::RwLock;
 use serde_json::json;
 
 struct Store {
+    prev: BTreeMap<u64, u64>,
     mem: BTreeMap<u64, u64>,
-    head: Option<String>,
-    unique_id: String,
+    dirty: bool,
 }
 
 impl Store {
-    pub fn init(node: &Node, unique_id: String) -> Self {
-        let head: Option<String> = node.read(KV::Lin, "head").ok();
-        let mem = head
-            .as_ref()
-            .map(|k| node.read(KV::Lin, k).unwrap())
-            .unwrap_or_default();
+    pub fn init(cache: &RwLock<BTreeMap<u64, u64>>) -> Self {
+        let cache = cache.read();
         Self {
-            head,
-            mem,
-            unique_id,
+            prev: cache.clone(),
+            mem: cache.clone(),
+            dirty: false,
         }
+    }
+
+    pub fn load(&mut self, node: &Node) {
+        self.prev = node.read(KV::Lin, "head").unwrap_or_default();
+        self.mem = self.prev.clone();
     }
 
     pub fn read(&mut self, k: u64) -> Option<u64> {
@@ -32,25 +31,34 @@ impl Store {
 
     pub fn write(&mut self, k: u64, v: u64) {
         self.mem.insert(k, v);
+        self.dirty = true;
     }
 
-    pub fn commit(self, node: &Node) -> bool {
-        node.write(KV::Lin, &self.unique_id, self.mem).unwrap();
-        node.cap(KV::Lin, "head", self.head, &self.unique_id, true)
-            .is_ok()
+    pub fn commit(&self, node: &Node, cache: &RwLock<BTreeMap<u64, u64>>) -> bool {
+        if self.dirty {
+            if node
+                .cap(KV::Lin, "head", &self.prev, &self.mem, true)
+                .is_ok()
+            {
+                *cache.write() = self.mem.clone();
+                true
+            } else {
+                false
+            }
+        } else {
+            true // Skip readonly transaction
+        }
     }
 }
 
 fn main() {
-    let counter = AtomicU64::new(0);
+    let cache: RwLock<BTreeMap<u64, u64>> = RwLock::new(BTreeMap::new());
+
     Node::new().run(|node, mut msg| match msg.body["type"].as_str().unwrap() {
         "txn" => {
-            let curr = counter.fetch_add(1, SeqCst);
-            let unique_id = format!("{}{}", node.id, curr);
-
             let mut txn = msg.body["txn"].take();
+            let mut store = Store::init(&cache);
             loop {
-                let mut store = Store::init(node, unique_id.clone());
                 for tx in txn.as_array_mut().unwrap() {
                     let vec = tx.as_array_mut().unwrap();
                     let ty = vec[0].as_str().unwrap();
@@ -63,9 +71,10 @@ fn main() {
                         _ => unreachable!(),
                     }
                 }
-                if store.commit(node) {
+                if store.commit(node, &cache) {
                     break;
                 }
+                store.load(node);
             }
 
             node.reply(
