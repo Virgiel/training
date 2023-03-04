@@ -32,7 +32,6 @@ pub struct Transactor {
     gen: IdGen,
     root: Option<String>,
     mem: BTreeMap<u64, String>,
-    cache: BTreeMap<String, Option<Vec<u64>>>,
 }
 
 impl Transactor {
@@ -41,11 +40,11 @@ impl Transactor {
             gen: IdGen::new(node),
             root: None,
             mem: BTreeMap::new(),
-            cache: BTreeMap::new(),
         }
     }
 
     pub fn run(&mut self, node: &Node, mut txns: Vec<Txn>) -> Vec<Txn> {
+        let mut cache: BTreeMap<String, Option<Vec<u64>>> = BTreeMap::new();
         // List all read and written id for RPC parallelism
         let (read_id, write_id) = {
             let mut read_id = BTreeSet::new();
@@ -81,18 +80,18 @@ impl Transactor {
                 let reads: Vec<_> = read_id
                     .iter()
                     // Only read uncached keys present in the database
-                    .filter_map(|i| self.mem.get(i).filter(|s| !self.cache.contains_key(*s)))
+                    .filter_map(|i| self.mem.get(i).filter(|s| !cache.contains_key(*s)))
                     .map(|id| (id, s.spawn(|| node.read(KV::Lin, id).ok())))
                     .collect();
                 for (k, v) in reads {
                     let v = v.join().unwrap();
-                    self.cache.insert(k.clone(), v);
+                    cache.insert(k.clone(), v);
                 }
             });
 
             // Run transactions
             for (ty, k, v) in txns.iter_mut().flatten() {
-                let value = self.mem.get(k).and_then(|id| self.cache[id].clone());
+                let value = self.mem.get(k).and_then(|id| cache[id].clone());
                 match ty.as_str() {
                     "r" => {
                         *v = json!(value);
@@ -102,7 +101,7 @@ impl Transactor {
                         prev.push(v.as_u64().unwrap());
                         let id = &write_id[k];
                         self.mem.insert(*k, id.clone());
-                        self.cache.insert(id.clone(), Some(prev));
+                        cache.insert(id.clone(), Some(prev));
                     }
                     _ => unreachable!(),
                 }
@@ -120,7 +119,7 @@ impl Transactor {
                     for k in write_id.keys() {
                         s.spawn(|| {
                             let id = &self.mem[k];
-                            let v = &self.cache[id];
+                            let v = &cache[id];
                             node.write(KV::Lin, id, v).unwrap();
                         });
                         s.spawn(|| {

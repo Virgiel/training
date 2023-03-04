@@ -6,7 +6,7 @@ use std::{
         mpsc::{sync_channel, Receiver, SyncSender},
     },
     thread::spawn,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use parking_lot::Mutex;
@@ -17,7 +17,7 @@ pub struct Node {
     sender: Mutex<SyncSender<Msg>>,
     receiver: Mutex<Receiver<Msg>>,
     id_counter: AtomicU64,
-    tasks: Mutex<TaskMap<oneshot::Sender<Result<Msg, Err>>>>,
+    pending: Mutex<BTreeMap<u64, oneshot::Sender<Result<Msg, Err>>>>,
     pub id: String,
     pub node_ids: Vec<String>,
 }
@@ -48,7 +48,7 @@ impl Node {
             id_counter: AtomicU64::new(0),
             receiver: Mutex::new(receiver),
             sender: Mutex::new(sender),
-            tasks: Mutex::new(TaskMap::new()),
+            pending: Mutex::new(BTreeMap::new()),
         };
         eprintln!("{} : {init:?}", tmp.id);
         tmp.reply(
@@ -112,13 +112,26 @@ impl Node {
 
     pub fn rpc(&self, dest: String, mut body: Value) -> Result<Msg, Err> {
         let id = self.next_id();
-        body["msg_id"] = id.into();
+        // Register this thread for wakeup on RPC response
         let (sender, receiver) = oneshot::channel();
-        self.tasks
-            .lock()
-            .add(sender, id, Instant::now() + Duration::from_secs(1));
+        self.pending.lock().insert(id, sender);
+        // Send RPC request
+        body["msg_id"] = id.into();
         self.send(dest, body);
-        receiver.recv().unwrap()
+
+        if let Ok(result) = receiver.recv_timeout(Duration::from_secs(1)) {
+            // Received response
+            result
+        } else {
+            // Unregister itself
+            self.pending.lock().remove(&id);
+            // Check for the last instant reception
+            if let Ok(result) = receiver.try_recv() {
+                result
+            } else {
+                Err(Err::Timeout)
+            }
+        }
     }
 
     pub fn read<M: DeserializeOwned>(&self, kv: KV, key: &str) -> Result<M, Err> {
@@ -149,37 +162,19 @@ impl Node {
         std::thread::scope(|s| {
             let receiver = self.receiver.lock();
             loop {
-                let now = Instant::now();
-                let deadline = {
-                    let mut map = self.tasks.lock();
-
-                    // Handle task that reached their deadlines
-
-                    if map.next_deadline().unwrap_or(now) < now {
-                        let task = map.pop();
-                        task.send(Err(Err::Timeout)).unwrap();
-                    }
-                    map.next_deadline()
-                };
-
-                let msg = match deadline {
-                    Some(deadline) => receiver.recv_timeout(deadline.duration_since(now)).ok(),
-                    None => receiver.recv().ok(),
-                };
-                if let Some(msg) = msg {
-                    eprintln!("{} < {msg:?}", self.id);
-                    if let Some(msg_id) = msg.body["in_reply_to"].as_u64() {
-                        if let Some(task) = self.tasks.lock().get(msg_id) {
-                            if msg.body["type"].as_str().unwrap() == "error" {
-                                let code = msg.body["code"].as_u64().unwrap();
-                                task.send(Err(Err::try_from(code).unwrap())).unwrap();
-                            } else {
-                                task.send(Ok(msg)).unwrap();
-                            }
+                let msg = receiver.recv().unwrap();
+                eprintln!("{} < {msg:?}", self.id);
+                if let Some(msg_id) = msg.body["in_reply_to"].as_u64() {
+                    if let Some(task) = self.pending.lock().remove(&msg_id) {
+                        if msg.body["type"].as_str().unwrap() == "error" {
+                            let code = msg.body["code"].as_u64().unwrap();
+                            task.send(Err(Err::try_from(code).unwrap())).unwrap();
+                        } else {
+                            task.send(Ok(msg)).unwrap();
                         }
-                    } else {
-                        s.spawn(|| lambda(self, msg));
                     }
+                } else {
+                    s.spawn(|| lambda(self, msg));
                 }
             }
         })
@@ -243,39 +238,5 @@ impl TryFrom<u64> for Err {
             30 => Self::TxnConflict,
             unknown => return Err(unknown),
         })
-    }
-}
-
-struct TaskMap<S> {
-    task_map: BTreeMap<(Instant, u64), S>,
-    id_map: BTreeMap<u64, Instant>,
-}
-
-impl<S> TaskMap<S> {
-    pub const fn new() -> Self {
-        Self {
-            task_map: BTreeMap::new(),
-            id_map: BTreeMap::new(),
-        }
-    }
-
-    pub fn add(&mut self, task: S, id: u64, deadline: Instant) {
-        self.task_map.insert((deadline, id), task);
-        self.id_map.insert(id, deadline);
-    }
-
-    pub fn next_deadline(&self) -> Option<Instant> {
-        self.task_map.first_key_value().map(|((t, _), _)| *t)
-    }
-
-    pub fn pop(&mut self) -> S {
-        let ((_, msg_id), task) = self.task_map.pop_first().unwrap();
-        self.id_map.remove(&msg_id);
-        task
-    }
-
-    pub fn get(&mut self, msg_id: u64) -> Option<S> {
-        let deadline = self.id_map.remove(&msg_id)?;
-        self.task_map.remove(&(deadline, msg_id))
     }
 }
