@@ -140,10 +140,9 @@ impl Transactor {
 }
 
 fn main() {
-    let node = Node::new();
+    let node = &Node::new();
     let (sender, receiver) = std::sync::mpsc::sync_channel::<Msg>(100);
     scope(|s| {
-        let node = &node;
         s.spawn(move || {
             let mut msgs = Vec::with_capacity(100);
             let mut actor = Transactor::new(node);
@@ -168,7 +167,7 @@ fn main() {
                 }
             }
         });
-        node.run(|_, msg| match msg.body["type"].as_str().unwrap() {
+        node.run(|msg| match msg.body["type"].as_str().unwrap() {
             "txn" => sender.send(msg).unwrap(),
             ty => unreachable!("msg type {ty}"),
         });

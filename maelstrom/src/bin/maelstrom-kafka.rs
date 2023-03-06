@@ -6,7 +6,8 @@ use serde_json::json;
 
 fn main() {
     let commit: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
-    Node::new().run(|node, mut msg| match msg.body["type"].as_str().unwrap() {
+    let node = &Node::new();
+    node.run(|mut msg| match msg.body["type"].as_str().unwrap() {
         "send" => {
             let key = msg.body["key"].as_str().unwrap().to_owned();
             loop {
@@ -63,7 +64,6 @@ fn main() {
                 .iter()
                 .map(|s| (s, *commit.lock().get(s).unwrap_or(&0)))
                 .collect();
-
             node.reply(
                 &msg,
                 json!({

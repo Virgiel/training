@@ -5,7 +5,8 @@ use serde_json::json;
 
 fn main() {
     let counter = AtomicU64::new(0);
-    Node::new().run(|node, msg| match msg.body["type"].as_str().unwrap() {
+    let node = &Node::new();
+    node.run(|msg| match msg.body["type"].as_str().unwrap() {
         "generate" => {
             let curr = counter.fetch_add(1, SeqCst);
             let id = format!("{}{}", node.id, curr);

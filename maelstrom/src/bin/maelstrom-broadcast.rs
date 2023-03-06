@@ -8,7 +8,8 @@ fn main() {
     let msgs = Mutex::new(BTreeSet::<u64>::new());
     let neighbours = RwLock::new(Vec::<String>::new());
 
-    Node::new().run(|node, mut msg| match msg.body["type"].as_str().unwrap() {
+    let node = &Node::new();
+    node.run(|mut msg| match msg.body["type"].as_str().unwrap() {
         "broadcast" => {
             let message = msg.body["message"].as_u64().unwrap();
             if msgs.lock().insert(message) {

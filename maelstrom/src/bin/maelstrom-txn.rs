@@ -54,7 +54,8 @@ impl Store {
 fn main() {
     let cache: RwLock<BTreeMap<u64, u64>> = RwLock::new(BTreeMap::new());
 
-    Node::new().run(|node, mut msg| match msg.body["type"].as_str().unwrap() {
+    let node = &Node::new();
+    node.run(|mut msg| match msg.body["type"].as_str().unwrap() {
         "txn" => {
             let mut txn = msg.body["txn"].take();
             let mut store = Store::init(&cache);

@@ -25,14 +25,10 @@ pub struct Node {
 impl Node {
     pub fn new() -> Self {
         let receiver = Self::receiver();
+        let sender = Self::sender();
 
         let init = receiver.recv().unwrap();
         assert_eq!(init.body["type"].as_str(), Some("init"));
-        let id = init.body["node_id"]
-            .as_str()
-            .map(|it| it.to_string())
-            .unwrap();
-        let sender = Self::sender(id);
 
         let tmp = Self {
             id: init.body["node_id"]
@@ -50,7 +46,6 @@ impl Node {
             sender: Mutex::new(sender),
             pending: Mutex::new(BTreeMap::new()),
         };
-        eprintln!("{} : {init:?}", tmp.id);
         tmp.reply(
             &init,
             json!({
@@ -69,24 +64,25 @@ impl Node {
                 buf.clear();
                 stdin.read_line(&mut buf).unwrap();
                 let msg: Msg = serde_json::from_str(&buf).unwrap();
-                sender.send(msg).unwrap()
+                eprintln!("{} < {} : {}", msg.dest, msg.src, msg.body);
+                sender.send(msg).unwrap();
             }
         });
         receiver
     }
 
-    fn sender(id: String) -> SyncSender<Msg> {
+    fn sender() -> SyncSender<Msg> {
         let (sender, receiver) = sync_channel(1);
         spawn(move || {
             let mut stdout = stdout().lock();
             let mut buf = Vec::with_capacity(1024);
             loop {
-                let msg = receiver.recv().unwrap();
+                let msg: Msg = receiver.recv().unwrap();
                 buf.clear();
                 serde_json::to_writer(&mut buf, &msg).unwrap();
                 buf.push(b'\n');
                 stdout.write_all(&buf).unwrap();
-                eprintln!("{} > {msg:?}", id);
+                eprintln!("{} > {} : {}", msg.src, msg.dest, msg.body);
             }
         });
         sender
@@ -96,8 +92,13 @@ impl Node {
         self.id_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
+
+    pub fn other_ids(&self) -> impl Iterator<Item = &String> {
+        self.node_ids.iter().filter(|it| **it != self.id)
+    }
+
     pub fn reply(&self, to: &Msg, mut body: Value) {
-        body["in_reply_to"] = to.body["msg_id"].clone();
+        body["in_reply_to"] = to.body["msg_id"].as_u64().unwrap().into();
         self.send(to.src.clone(), body);
     }
 
@@ -158,12 +159,11 @@ impl Node {
         self.rpc(kv.id().to_string(), json!({"type": "cas", "key": key, "from": from, "to": to, "create_if_not_exists": create_if_not_exists})).map(|_| ())
     }
 
-    pub fn run(&self, lambda: impl Fn(&Node, Msg) + Send + Sync) {
+    pub fn run<'a>(&'a self, lambda: impl Fn(Msg) + Send + Sync + 'a) {
         std::thread::scope(|s| {
             let receiver = self.receiver.lock();
             loop {
                 let msg = receiver.recv().unwrap();
-                eprintln!("{} < {msg:?}", self.id);
                 if let Some(msg_id) = msg.body["in_reply_to"].as_u64() {
                     if let Some(task) = self.pending.lock().remove(&msg_id) {
                         if msg.body["type"].as_str().unwrap() == "error" {
@@ -174,14 +174,14 @@ impl Node {
                         }
                     }
                 } else {
-                    s.spawn(|| lambda(self, msg));
+                    s.spawn(|| lambda(msg));
                 }
             }
         })
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Msg {
     pub src: String,
     pub dest: String,
@@ -207,17 +207,39 @@ impl KV {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Err {
-    Timeout = 0,
-    NodeNotFound = 1,
-    NotSupported = 10,
-    TemporarilyUnavailable = 11,
-    MalformedRequest = 12,
-    Crash = 13,
-    Abort = 14,
-    KeyDoesNotExist = 20,
-    KeyAlreadyExists = 21,
-    PreconditionFailed = 22,
-    TxnConflict = 30,
+    Timeout,
+    NodeNotFound,
+    NotSupported,
+    TemporarilyUnavailable,
+    MalformedRequest,
+    Crash,
+    Abort,
+    KeyDoesNotExist,
+    KeyAlreadyExists,
+    PreconditionFailed,
+    TxnConflict,
+}
+
+impl Err {
+    pub fn msg(self) -> Value {
+        let code = match self {
+            Err::Timeout => 0,
+            Err::NodeNotFound => 1,
+            Err::NotSupported => 10,
+            Err::TemporarilyUnavailable => 11,
+            Err::MalformedRequest => 12,
+            Err::Crash => 13,
+            Err::Abort => 14,
+            Err::KeyDoesNotExist => 20,
+            Err::KeyAlreadyExists => 21,
+            Err::PreconditionFailed => 22,
+            Err::TxnConflict => 30,
+        };
+        json!({
+            "type": "error",
+            "code": code
+        })
+    }
 }
 
 impl TryFrom<u64> for Err {

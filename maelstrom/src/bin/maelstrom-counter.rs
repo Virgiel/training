@@ -8,7 +8,7 @@ use std::{
 use gossip_glomers::Node;
 use serde_json::json;
 fn main() {
-    let node = Node::new();
+    let node = &Node::new();
     let state: BTreeMap<String, AtomicU64> = node
         .node_ids
         .iter()
@@ -21,24 +21,22 @@ fn main() {
         s.spawn(|| loop {
             sleep(Duration::from_secs(1));
             let current = state[&node.id].load(SeqCst);
-            for id in &node.node_ids {
-                if id != &node.id {
-                    let node = &node;
-                    s.spawn(move || {
-                        node.rpc(
-                            id.clone(),
-                            json!({
-                                "type": "broadcast",
-                                "counter": current
-                            }),
-                        )
-                        .ok();
-                    });
-                }
+            for id in node.other_ids() {
+                let node = &node;
+                s.spawn(move || {
+                    node.rpc(
+                        id.clone(),
+                        json!({
+                            "type": "broadcast",
+                            "counter": current
+                        }),
+                    )
+                    .ok();
+                });
             }
         });
 
-        node.run(|node, msg| match msg.body["type"].as_str().unwrap() {
+        node.run(|msg| match msg.body["type"].as_str().unwrap() {
             "broadcast" => {
                 let counter = msg.body["counter"].as_u64().unwrap();
                 state[&msg.src].store(counter, SeqCst);
