@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    sync::atomic::{AtomicU64, Ordering::SeqCst},
+    sync::atomic::{AtomicI64, Ordering::SeqCst},
     thread::{scope, sleep},
     time::Duration,
 };
@@ -9,11 +9,11 @@ use gossip_glomers::Node;
 use serde_json::json;
 fn main() {
     let node = &Node::new();
-    let state: BTreeMap<String, AtomicU64> = node
+    let state: BTreeMap<String, AtomicI64> = node
         .node_ids
         .iter()
         .cloned()
-        .map(|s| (s, AtomicU64::new(0)))
+        .map(|s| (s, AtomicI64::new(0)))
         .collect();
 
     scope(|s| {
@@ -38,7 +38,7 @@ fn main() {
 
         node.run(|msg| match msg.body["type"].as_str().unwrap() {
             "broadcast" => {
-                let counter = msg.body["counter"].as_u64().unwrap();
+                let counter = msg.body["counter"].as_i64().unwrap();
                 state[&msg.src].store(counter, SeqCst);
                 node.reply(
                     &msg,
@@ -48,7 +48,7 @@ fn main() {
                 );
             }
             "read" => {
-                let sum = state.values().map(|i| i.load(SeqCst)).sum::<u64>();
+                let sum = state.values().map(|i| i.load(SeqCst)).sum::<i64>();
                 node.reply(
                     &msg,
                     json!({
@@ -58,7 +58,7 @@ fn main() {
                 )
             }
             "add" => {
-                state[&node.id].fetch_add(msg.body["delta"].as_u64().unwrap(), SeqCst);
+                state[&node.id].fetch_add(msg.body["delta"].as_i64().unwrap(), SeqCst);
                 node.reply(
                     &msg,
                     json!({

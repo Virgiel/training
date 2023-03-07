@@ -11,7 +11,7 @@ kafka: install
     maelstrom/maelstrom test -w kafka --bin ~/.cargo/bin/maelstrom-kafka --node-count 2 --concurrency 2n --time-limit 20 --rate 1000
 
 counter: install
-    maelstrom/maelstrom test -w g-counter --bin ~/.cargo/bin/maelstrom-counter --node-count 3 --rate 100 --time-limit 20 --nemesis partition
+    maelstrom/maelstrom test -w pn-counter --bin ~/.cargo/bin/maelstrom-counter --node-count 3 --rate 100 --time-limit 20 --nemesis partition
 
 broadcast: install
     maelstrom/maelstrom test -w broadcast --bin ~/.cargo/bin/maelstrom-broadcast --node-count 25 --time-limit 20 --rate 100 --latency 100 --nemesis partition 
@@ -22,7 +22,7 @@ generate: install
 echo: install
     maelstrom/maelstrom test -w echo --bin ~/.cargo/bin/maelstrom-echo --node-count 1 --time-limit 10
 
-all: echo generate broadcast counter kafka txn datomic
+all: echo generate broadcast counter kafka txn datomic raft
 
 pull:
     curl -L https://github.com/jepsen-io/maelstrom/releases/download/v0.2.3/maelstrom.tar.bz2 | tar -xj
