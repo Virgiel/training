@@ -48,8 +48,11 @@ fn main() {
         "commit_offsets" => {
             let offsets: BTreeMap<String, u64> =
                 serde_json::from_value(msg.body["offsets"].take()).unwrap();
-            for (k, offset) in offsets {
-                *commit.lock().entry(k).or_default() = offset;
+            {
+                let mut lock = commit.lock();
+                for (k, offset) in offsets {
+                    *lock.entry(k).or_default() = offset;
+                }
             }
             node.reply(
                 &msg,
@@ -60,10 +63,12 @@ fn main() {
         }
         "list_committed_offsets" => {
             let keys: Vec<String> = serde_json::from_value(msg.body["keys"].take()).unwrap();
-            let offsets: BTreeMap<&String, u64> = keys
-                .iter()
-                .map(|s| (s, *commit.lock().get(s).unwrap_or(&0)))
-                .collect();
+            let offsets: BTreeMap<&String, u64> = {
+                let lock = commit.lock();
+                keys.iter()
+                    .map(|s| (s, *lock.get(s).unwrap_or(&0)))
+                    .collect()
+            };
             node.reply(
                 &msg,
                 json!({

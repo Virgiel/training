@@ -165,7 +165,8 @@ impl Node {
             loop {
                 let msg = receiver.recv().unwrap();
                 if let Some(msg_id) = msg.body["in_reply_to"].as_u64() {
-                    if let Some(task) = self.pending.lock().remove(&msg_id) {
+                    let task = self.pending.lock().remove(&msg_id);
+                    if let Some(task) = task {
                         if msg.body["type"].as_str().unwrap() == "error" {
                             let code = msg.body["code"].as_u64().unwrap();
                             task.send(Err(Err::try_from(code).unwrap())).unwrap();
